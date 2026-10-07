@@ -13,7 +13,8 @@ BarWidget {
   property var langVerses: []
   property var languageMeta: []
   property string pluginVersion: ""
-  property date today: clock.date
+  property date now: new Date()
+  readonly property date today: new Date(now.getFullYear(), now.getMonth(), now.getDate())
   readonly property string userId: Quickshell.env("USER") || Quickshell.env("USERNAME") || "local"
   readonly property string resolvedVersion: Model.versionFromRegistry(root.bar, root.moduleName) || pluginVersion
   // Language: explicit `language` bar setting wins ("auto" follows the system locale).
@@ -25,14 +26,39 @@ BarWidget {
   readonly property string versesFileName: Model.versesFileForLanguage(language)
   readonly property var activeVerses: Model.selectVerses(enVerses, langVerses, language)
   readonly property string activeLanguage: Model.activeLanguage(enVerses, langVerses, language)
-  readonly property var verse: Model.verseForDate(activeVerses, today, userId)
+  // Rotation: bar, panel and wallpaper share one schedule (Model.verseForInterval),
+  // so they always show the same verse for the current slot.
+  readonly property int intervalMinutes: Model.clampInterval(setting("intervalMinutes", Model.DEFAULT_INTERVAL_MINUTES))
+  readonly property bool wallpaperEnabled: Model.parseBool(setting("wallpaper", true), true)
+  readonly property string wallpaperPosition: Model.positionEntry(setting("position", Model.DEFAULT_POSITION)).value
+  readonly property real backgroundOpacity: Model.clampOpacity(setting("backgroundOpacity", Model.DEFAULT_BACKGROUND_OPACITY))
+  readonly property var verse: Model.verseForInterval(activeVerses, now, userId, intervalMinutes)
   readonly property string configuredFormat: setting("format", "short")
-  readonly property string displayText: Model.barLabel(verse, configuredFormat) || "Bible"
-  readonly property var verticalLines: Model.verticalLines(displayText)
+  readonly property string referenceLabel: Model.barLabel(verse, configuredFormat) || ""
+  // The bar label carries the verse itself plus its reference, not just the
+  // citation — the citation alone told you nothing about the words. The centre
+  // cluster grows rightward, so the verse is cut on a word boundary to a budget
+  // that keeps it clear of the right-hand cluster; the tooltip, panel and
+  // wallpaper card still carry the full text.
+  readonly property int barVerseBudget: 48
+  readonly property string displayText: (verse && verse.text
+    ? excerpt(String(verse.text), barVerseBudget) + " — " + referenceLabel
+    : referenceLabel) || "Bible"
+  // Vertical bar slots are narrow; keep those lines to the citation only.
+  readonly property var verticalLines: Model.verticalLines(referenceLabel)
   readonly property string copyText: Model.copyPayload(verse, activeLanguage, languageMeta)
 
+  function excerpt(text, limit) {
+    var t = String(text || "").trim()
+    if (t.length <= limit) return t
+    var cut = t.slice(0, limit)
+    var space = cut.lastIndexOf(" ")
+    if (space >= Math.floor(limit / 2)) cut = cut.slice(0, space)
+    return cut.replace(/[.!?,;:]+$/, "") + "…"
+  }
+
   function refresh() {
-    today = new Date()
+    now = new Date()
     versesFileEn.reload()
     versesFileLang.reload()
     languagesFile.reload()
@@ -45,15 +71,38 @@ BarWidget {
     Quickshell.execDetached(["omarchy-notification-send", "-g", "󰂺", "Copied " + (verse ? verse.reference : "verse")])
   }
 
-  function persistLanguage(value) {
+  // Merge `patch` into this widget's inline shell.json entry. The wallpaper
+  // service reads the same entry, so this is the single source of truth for
+  // language, rotation and wallpaper placement.
+  function persistSettings(patch) {
     var nextSettings = {}
     var currentSettings = root.settings || {}
     for (var key in currentSettings) nextSettings[key] = currentSettings[key]
-    nextSettings.language = String(value || "auto")
+    for (var patchKey in patch) nextSettings[patchKey] = patch[patchKey]
     root.settings = nextSettings
     if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function")
       root.bar.shell.updateEntryInline(root.moduleName, nextSettings)
     return true
+  }
+
+  function persistLanguage(value) {
+    return persistSettings({ language: String(value || "auto") })
+  }
+
+  function persistInterval(value) {
+    return persistSettings({ intervalMinutes: Model.clampInterval(value) })
+  }
+
+  function persistPosition(value) {
+    return persistSettings({ position: Model.positionEntry(value).value })
+  }
+
+  function persistWallpaper(value) {
+    return persistSettings({ wallpaper: Model.parseBool(value, true) })
+  }
+
+  function persistOpacity(value) {
+    return persistSettings({ backgroundOpacity: Model.clampOpacity(value) })
   }
 
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
@@ -92,8 +141,15 @@ BarWidget {
     if ("persistLanguage" in target) target.persistLanguage = root.persistLanguage
     if ("verses" in target) target.verses = root.activeVerses
     if ("language" in target) target.language = root.language
-    if ("today" in target) target.today = root.today
     if ("userId" in target) target.userId = root.userId
+    if ("intervalMinutes" in target) target.intervalMinutes = root.intervalMinutes
+    if ("wallpaperEnabled" in target) target.wallpaperEnabled = root.wallpaperEnabled
+    if ("position" in target) target.position = root.wallpaperPosition
+    if ("backgroundOpacity" in target) target.backgroundOpacity = root.backgroundOpacity
+    if ("persistInterval" in target) target.persistInterval = root.persistInterval
+    if ("persistPosition" in target) target.persistPosition = root.persistPosition
+    if ("persistWallpaper" in target) target.persistWallpaper = root.persistWallpaper
+    if ("persistOpacity" in target) target.persistOpacity = root.persistOpacity
     if ("pluginVersion" in target) target.pluginVersion = root.resolvedVersion
   }
 
@@ -114,16 +170,14 @@ BarWidget {
     injectPanel()
   }
   onTodayChanged: injectPanel()
+  onVerseChanged: injectPanel()
   onPluginVersionChanged: injectPanel()
   onResolvedVersionChanged: injectPanel()
 
   SystemClock {
     id: clock
-    precision: SystemClock.Minutes
-    onDateChanged: {
-      if (Model.dateKey(date) === Model.dateKey(root.today)) return
-      root.today = date
-    }
+    precision: SystemClock.Seconds
+    onDateChanged: root.now = date
   }
 
   FileView {
